@@ -17,7 +17,7 @@
 
 const char *usage_msg =
 	"Usage: (1) rtspin OPTIONS WCET PERIOD DURATION\n"
-	"       (2) rtspin -S [INPUT] WCET PERIOD DURATION\n"
+	"       (2) rtspin [-S SERVER_ID] WCET PERIOD DURATION\n"
 	"       (3) rtspin OPTIONS -C FILE:COLUMN WCET PERIOD [DURATION]\n"
 	"       (4) rtspin -l [-a CYCLES]\n"
 	"       (5) rtspin -B -m FOOTPRINT\n"
@@ -175,10 +175,6 @@ static int loop_for(double exec_time, double emergency_exit)
 				 * execution time tracking is broken in the LITMUS^RT
 				 * kernel or the user specified infeasible parameters.
 				 */
-				fprintf(stderr, "!!! rtspin/%d emergency exit!\n",
-				        getpid());
-				fprintf(stderr, "Reached experiment timeout while "
-				        "spinning.\n");
 				break;
 			}
 		}
@@ -298,29 +294,51 @@ static int generate_output(int output_fd)
 	return written == len;
 }
 
+/*
+ * RUN_SBLP job function, Ricardo, supposing sleep_next_period() is causing a bug
+ */
+static int job(double exec_time, double program_end, int lock_od, double cs_length)
+{
+        if (wctime() > program_end)
+                return 0;
+        else {
+                if (lock_od >= 0) {
+                        loop_for(exec_time-cs_length, program_end + 1);
+                        litmus_lock(lock_od);
+                        loop_for(cs_length, program_end+1);
+                        litmus_unlock(lock_od);
+                } else {
+                        loop_for(exec_time, program_end + 1);
+                }
+//                sleep_next_period();
+                return 1;
+        }
+}
+
+/* Litmus original job function, Ricardo
 static void job(double exec_time, double program_end, int lock_od, double cs_length)
 {
 	double chunk1, chunk2;
 
 	if (lock_od >= 0) {
-		/* simulate critical section somewhere in the middle */
+		// simulate critical section somewhere in the middle 
 		chunk1 = drand48() * (exec_time - cs_length);
 		chunk2 = exec_time - cs_length - chunk1;
 
-		/* non-critical section */
+		// non-critical section 
 		loop_for(chunk1, program_end + 1);
 
-		/* critical section */
+		// critical section 
 		litmus_lock(lock_od);
 		loop_for(cs_length, program_end + 1);
 		litmus_unlock(lock_od);
 
-		/* non-critical section */
+		// non-critical section 
 		loop_for(chunk2, program_end + 2);
 	} else {
 		loop_for(exec_time, program_end + 1);
 	}
-}
+}*/
 
 static lt_t choose_inter_arrival_time_ns(
 	double* arrival_times, int num_arrivals, int cur_job,
@@ -336,7 +354,7 @@ static lt_t choose_inter_arrival_time_ns(
 	return ms2ns(iat_ms);
 }
 
-#define OPTSTR "p:c:wlveo:s:m:q:r:X:L:Q:iRu:U:Bhd:C:S::O::TD:E:A:a:"
+#define OPTSTR "p:c:wlveo:s:m:q:r:X:L:Q:iRu:U:Bhd:C:S:O:TD:E:A:a:b:"
 
 int main(int argc, char** argv)
 {
@@ -398,10 +416,14 @@ int main(int argc, char** argv)
 
 	/* locking */
 	int lock_od = -1;
-	int resource_id = 0;
 	const char *lock_namespace = "./rtspin-locks";
 	int protocol = -1;
-	double cs_length = 1; /* millisecond */
+	double cs_length_aux = 0.0; /* millisecond */
+	int resource_id_aux = -1;
+	double cs_length = 0.0; /* millisecond */
+	int resource_id = -1;
+
+	int server_id = -1;
 
 	progname = argv[0];
 
@@ -458,19 +480,8 @@ int main(int argc, char** argv)
 			linux_sleep = 1;
 			break;
 		case 'S':
-			sporadic = 1;
-			if (!optarg || strcmp(optarg, "-") == 0)
-				event_fd = STDIN_FILENO;
-			else
-				event_fd = open(optarg, O_RDONLY);
-			if (event_fd == -1) {
-				fprintf(stderr, "Could not open file '%s' "
-					"(%m)\n", optarg);
-				usage("-S requires a valid file path or '-' "
-				      "for STDIN.");
-			}
+			server_id = want_non_negative_int(optarg, "-S");
 			break;
-
 		case 'O':
 			want_output = 1;
 			if (!optarg || strcmp(optarg, "-") == 0)
@@ -484,7 +495,6 @@ int main(int argc, char** argv)
 				      "for STDOUT.");
 			}
 			break;
-
 		case 'T':
 			linux_sleep = 1;
 			break;
@@ -524,11 +534,10 @@ int main(int argc, char** argv)
 				usage("Unknown locking protocol specified.");
 			break;
 		case 'L':
-			cs_length = want_positive_double(optarg, "-L");
+			cs_length_aux = want_non_negative_double(optarg, "-L");
 			break;
 		case 'Q':
-			resource_id = want_non_negative_int(optarg, "-Q");
-
+			resource_id_aux = want_non_negative_int(optarg, "-Q");
 			break;
 		case 'v':
 			verbose = 1;
@@ -669,10 +678,18 @@ int main(int argc, char** argv)
 		else
 			param.cpu = domain_to_first_cpu(cluster);
 	}
-	ret = set_rt_task_param(gettid(), &param);
-	if (ret < 0)
-		bail_out("could not setup rt task params");
+        /* Id of the associated RUN Server, Ricardo */
+	param.run_server_id = server_id;
+	if (cs_length_aux > 0.0) {
+		cs_length = cs_length_aux;
+		resource_id = resource_id_aux;
+		param.resource_ref_id = resource_id;
+	}
 
+	ret = set_rt_task_param(gettid(), &param);
+	if (ret < 0) 
+		bail_out("could not setup rt task params");
+                
 	if (create_reservation) {
 		struct reservation_config config;
 		memset(&config, 0, sizeof(config));
@@ -690,17 +707,19 @@ int main(int argc, char** argv)
 
 	srand48(time(NULL));
 
-
-	init_litmus();
+	ret = init_litmus();
+        //printf("ret init_litmus(%d) = %d\n", gettid(), ret);
 
 	start = wctime();
 	ret = task_mode(LITMUS_RT_TASK);
-	if (ret != 0)
+	if (ret != 0) {
+                //printf("ret task_mode for task %d = %d\n", gettid(), ret);
 		bail_out("could not become RT task");
+        }
 
 	cp = get_ctrl_page();
 
-	if (protocol >= 0) {
+	if (protocol >= 0 && resource_id >= 0 && cs_length_aux > 0.0) {
 		/* open reference to semaphore */
 		lock_od = litmus_open_lock(protocol, resource_id, lock_namespace, &cluster);
 		if (lock_od < 0) {
@@ -709,14 +728,17 @@ int main(int argc, char** argv)
 		}
 	}
 
-
 	if (wait) {
+        //printf("rtspin.if(wait) for task %d\n", gettid());
 		ret = wait_for_ts_release();
-		if (ret != 0)
-			bail_out("wait_for_ts_release()");
+		if (ret != 0) {
+			//printf("wait_for_ts_release(%d) = %d\n", gettid(), ret);
+			bail_out("wait_for_ts_release()\n");
+		}
+		//printf("before wctime(%d)\n", gettid());
 		start = wctime();
+		//printf("after wctime(%d)\n", gettid());
 	}
-
 
 	next_release = cp ? cp->release : litmus_clock();
 
@@ -745,8 +767,10 @@ int main(int argc, char** argv)
 		}
 
 		/* first, check if we have reached the end of the run */
-		if (wctime() > start + duration)
+		if (wctime() > start + duration) {
+			//printf("wctime() > start + duration for task %d\n", gettid());
 			break;
+		}
 
 		if (verbose) {
 			get_job_no(&job_no);
@@ -759,25 +783,25 @@ int main(int argc, char** argv)
 				current  = ns2s((double) now);
 				release  = ns2s((double) cp->release);
 				fprintf(stderr,
-				        "\trelease:  %" PRIu64 "ns (=%.2fs)\n",
-				        (uint64_t) cp->release, release);
+				        "\trelease(%d:%d):  %" PRIu64 "ns (=%.2fs)\n",
+						gettid(), job_no, (uint64_t) cp->release, release);
 				fprintf(stderr,
-				        "\tdeadline: %" PRIu64 "ns (=%.2fs)\n",
-				        (uint64_t) cp->deadline, deadline);
+				        "\tdeadline(%d:%d): %" PRIu64 "ns (=%.2fs)\n",
+						gettid(), job_no, (uint64_t) cp->deadline, deadline);
 				fprintf(stderr,
-				        "\tcur time: %" PRIu64 "ns (=%.2fs)\n",
-				        (uint64_t) now, current);
+				        "\tcur time(%d:%d): %" PRIu64 "ns (=%.2fs)\n",
+						gettid(), job_no, (uint64_t) now, current);
 				fprintf(stderr,
-				        "\ttime until deadline: %.2fms\n",
-				        (deadline - current) * 1000);
+				        "\ttime until deadline(%d:%d): %.2fms\n",
+						gettid(), job_no, (deadline - current) * 1000);
 			}
 			if (report_interrupts && cp) {
 				uint64_t irq = cp->irq_count;
 
 				fprintf(stderr,
-				        "\ttotal interrupts: %" PRIu64
+				        "\ttotal interrupts(%d:%d): %" PRIu64
 				        "; delta: %" PRIu64 "\n",
-				       irq, irq - last_irq_count);
+						gettid(), job_no, irq, irq - last_irq_count);
 				last_irq_count = irq;
 			}
 		}
@@ -798,7 +822,9 @@ int main(int argc, char** argv)
 
 		if (verbose)
 			fprintf(stderr,
-				"\ttarget exec. time: %6.2fms (%.2f%% of WCET)\n",
+				"\ttarget exec. time(%d:%d): %6.2fms (%.2f%% of WCET)\n",
+				gettid(),
+				job_no,
 				acet * 1000,
 				(acet * 1000 / wcet_ms) * 100);
 
@@ -830,7 +856,7 @@ int main(int argc, char** argv)
 
 				if (verbose)
 					fprintf(stderr,
-				                "\tclock_nanosleep() until %"
+				                "\t(if linux_sleep)clock_nanosleep() until %"
 					        PRIu64 "ns (=%.2fs), "
 					        "delta %" PRIu64 "ns (=%.2fms)\n",
 				                (uint64_t) next_release,
@@ -845,7 +871,7 @@ int main(int argc, char** argv)
 				 * this by not actually suspending the task. */
 				if (verbose && cp)
 					fprintf(stderr,
-				                "\tsleep_next_period() until %"
+				                "\t(elseif !linux_sleep)sleep_next_period() until %"
 					        PRIu64 "ns (=%.2fs)\n",
 					        (uint64_t) (cp->release + period),
 					        ns2s((double) (cp->release + period)));
@@ -856,6 +882,7 @@ int main(int argc, char** argv)
 	}
 
 	ret = task_mode(BACKGROUND_TASK);
+
 	if (ret != 0)
 		bail_out("could not become regular task (huh?)");
 
@@ -864,6 +891,8 @@ int main(int argc, char** argv)
 
 	if (base != MAP_FAILED)
 		munlock(base, rss);
+
+	printf("After returning to be a regular task (%d).\n", gettid());
 
 	return 0;
 }

@@ -27,6 +27,7 @@ static struct {
 	LP(DPCP),
 	LP(PCP),
 	LP(DFLP),
+        LP(RUN),
 };
 
 #define NUM_PROTOS (sizeof(protocol)/sizeof(protocol[0]))
@@ -68,8 +69,6 @@ int litmus_open_lock(
 	close(fd);
 	return od;
 }
-
-
 
 void show_rt_param(struct rt_task* tp)
 {

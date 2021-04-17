@@ -177,7 +177,8 @@ typedef enum  {
 						  Virtual Spinning */
 	DPCP_SEM	= 4, /**< Distributed Priority Ceiling Protocol */
 	PCP_SEM		= 5, /**< Priority Ceiling Protocol */
-	DFLP_SEM	= 6, /**< Distributed FIFO Locking Protocol */
+        RUN_SEM         = 6, /* RUN Protocol */
+	DFLP_SEM	= 7, /**< Distributed FIFO Locking Protocol */
 } obj_type_t;
 
 /**
@@ -198,6 +199,7 @@ const char* name_for_lock_protocol(int id);
  * Do a syscall for opening a generic lock
  */
 int od_openx(int fd, obj_type_t type, int obj_id, void* config);
+
 /**
  * Close a lock, given its object descriptor
  * @param od Object descriptor for lock to close
@@ -320,10 +322,17 @@ int wait_for_ts_release(void);
  * set up.
  */
 int release_ts(lt_t *when);
+
+/**
+ * @todo Document
+ */
+int run_add_node(int *id, lt_t *rate_a, lt_t *rate_b, int *level);
+
 /**
  * Obtain the number of currently waiting tasks
  * @return The number of waiting tasks
  */
+
 int get_nr_ts_release_waiters(void);
 /**
  * @todo Document
@@ -462,6 +471,11 @@ static inline int open_dflp_sem(int fd, int name, int cpu)
  */
 
 int get_current_budget(lt_t *expended, lt_t *remaining);
+
+static inline int open_run_sem(int fd, int name)
+{
+    return od_open(fd, RUN_SEM, name);
+}
 
 /**
  * Do nothing as a syscall
